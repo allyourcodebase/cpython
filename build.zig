@@ -1,14 +1,16 @@
 const Version = enum {
     @"3.11.13",
     @"3.12.11",
+    @"3.13.5",
     pub fn libName(self: Version) []const u8 {
         return switch (self) {
             .@"3.11.13" => "3.11",
             .@"3.12.11" => "3.12",
+            .@"3.13.5" => "3.13",
         };
     }
 
-    pub const latest: Version = .@"3.12.11";
+    pub const latest: Version = .@"3.13.5";
 };
 
 /// There are 3 stages of the python exe, the first two are used compile and embed modules for
@@ -61,6 +63,7 @@ pub fn build(b: *std.Build) !void {
     const upstream: *std.Build.Dependency = switch (version) {
         .@"3.11.13" => if (b.lazyDependency("upstream_3.11.13", .{})) |d| d else noUpstream(b),
         .@"3.12.11" => if (b.lazyDependency("upstream_3.12.11", .{})) |d| d else noUpstream(b),
+        .@"3.13.5" => if (b.lazyDependency("upstream_3.13.5", .{})) |d| d else noUpstream(b),
     };
 
     const target = b.standardTargetOptions(.{});
@@ -273,7 +276,6 @@ fn addMakesetup(
         ._struct = true,
         ._zoneinfo = true,
         .array = true,
-        .audioop = true,
         .binascii = true,
         .cmath = true,
         .math = true,
@@ -295,9 +297,7 @@ fn addMakesetup(
         .fcntl = is_posix,
         ._posixshmem = is_posix,
         .grp = is_posix,
-        .ossaudiodev = (args.os_tag == .linux),
         .resource = (args.os_tag == .linux),
-        .spwd = (args.os_tag == .linux),
         .syslog = is_posix,
         .termios = is_posix,
 
@@ -314,8 +314,6 @@ fn addMakesetup(
         .readline = false,
         .pyexpat = false,
         ._elementtree = false,
-        ._crypt = false,
-        .nis = false,
         ._ctypes = false,
         ._curses = false,
         ._curses_panel = false,
@@ -334,17 +332,40 @@ fn addMakesetup(
         ._ctypes_test = false,
         .xxlimited = false,
         .xxlimited_35 = false,
-        ._xxsubinterpreters = false,
     };
     const @"stdlib_modules_3.11.13" = .{
+        .audioop = true,
+        .spwd = (args.os_tag == .linux),
+        .nis = false,
+        .ossaudiodev = (args.os_tag == .linux),
+        ._crypt = false,
         ._typing = true,
         ._sha256 = true,
         ._sha512 = true,
+        ._xxsubinterpreters = false,
     };
     const @"stdlib_modules_3.12.11" = .{
+        .audioop = true,
+        .spwd = (args.os_tag == .linux),
+        .nis = false,
+        .ossaudiodev = (args.os_tag == .linux),
+        ._crypt = false,
         ._sha2 = false,
         .xxsubtype = false,
         ._xxinterpchannels = false,
+        ._xxsubinterpreters = false,
+    };
+    const @"stdlib_modules_3.13.5" = .{
+        ._sha2 = false,
+        .xxsubtype = false,
+
+        ._interpreters = false,
+        ._interpchannels = false,
+        ._interpqueues = false,
+        ._testlimitedcapi = false,
+        ._testclinic_limited = false,
+        ._testsinglephase = false,
+        ._testexternalinspection = false,
     };
 
     const setup_bootstrap = blk: {
@@ -370,6 +391,10 @@ fn addMakesetup(
             .@"3.12.11" => {
                 replace.addArg("MODULE__CTYPES_MALLOC_CLOSURE=");
                 addReplaceModuleArgs(b, replace, @TypeOf(@"stdlib_modules_3.12.11"), @"stdlib_modules_3.12.11");
+            },
+            .@"3.13.5" => {
+                replace.addArg("MODULE__CTYPES_MALLOC_CLOSURE=");
+                addReplaceModuleArgs(b, replace, @TypeOf(@"stdlib_modules_3.13.5"), @"stdlib_modules_3.13.5");
             },
         }
         break :blk_stdlib out;
@@ -440,7 +465,7 @@ fn addPythonExe(
             // workaround dictobject.c memcpy alignment issue
             exe.root_module.sanitize_c = false;
         },
-        .@"3.12.11" => {},
+        else => {},
     }
 
     exe.root_module.addCMacro("Py_BUILD_CORE", "");
@@ -451,6 +476,7 @@ fn addPythonExe(
             const release_date = switch (args.pyconfig.version) {
                 .@"3.11.13" => "June 3, 2025",
                 .@"3.12.11" => "June 3, 2025",
+                .@"3.13.5" => "June 11, 2025",
             };
             // need to redefine __DATE__ and __TIME__ for a reproducible build
             exe.root_module.addCMacro("__DATE__", b.fmt("\"{s}\"", .{release_date}));
@@ -471,7 +497,10 @@ fn addPythonExe(
     exe.addIncludePath(upstream.path("Include"));
     exe.addIncludePath(upstream.path("Include/internal"));
     if (args.stage.stage2FrozenMods()) |mods| {
-        exe.addIncludePath(mods.getpath_h.dirname().dirname());
+        switch (args.pyconfig.version) {
+            .@"3.11.13", .@"3.12.11" => exe.addIncludePath(mods.getpath_h.dirname().dirname()),
+            else => exe.addIncludePath(mods.getpath_h.dirname().dirname().dirname()),
+        }
         exe.addIncludePath(mods.importlib_bootstrap_h.dirname().dirname().dirname());
         exe.addIncludePath(mods.importlib_bootstrap_external_h.dirname().dirname().dirname());
         exe.addIncludePath(mods.zipimport_h.dirname().dirname().dirname());
@@ -568,6 +597,7 @@ fn addPythonExe(
                 switch (args.pyconfig.version) {
                     .@"3.11.13" => &library_src_omit_frozen.@"3.11.13",
                     .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
+                    .@"3.13.5" => &library_src_omit_frozen.@"3.13.5",
                 },
             }),
             .bootstrap => concat(b.allocator, &.{
@@ -578,6 +608,7 @@ fn addPythonExe(
                 switch (args.pyconfig.version) {
                     .@"3.11.13" => &library_src_omit_frozen.@"3.11.13",
                     .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
+                    .@"3.13.5" => &library_src_omit_frozen.@"3.13.5",
                 },
             }),
             .final => concat(b.allocator, &.{
@@ -589,6 +620,7 @@ fn addPythonExe(
                 switch (args.pyconfig.version) {
                     .@"3.11.13" => &library_src_omit_frozen.@"3.11.13",
                     .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
+                    .@"3.13.5" => &library_src_omit_frozen.@"3.13.5",
                 },
             }),
         },
@@ -670,7 +702,6 @@ const header_config_set = struct {
         .{ .HAVE_BLUETOOTH_BLUETOOTH_H, "bluetooth/bluetooth.h" },
         .{ .HAVE_BZLIB_H, "bzlib.h" },
         .{ .HAVE_CONIO_H, "conio.h" },
-        .{ .HAVE_CRYPT_H, "crypt.h" },
         .{ .HAVE_CURSES_H, "curses.h" },
         .{ .HAVE_DIRECT_H, "direct.h" },
         .{ .HAVE_DIRENT_H, "dirent.h" },
@@ -683,7 +714,6 @@ const header_config_set = struct {
         .{ .HAVE_GDBM_H, "gdbm.h" },
         .{ .HAVE_GDBM_NDBM_H, "gdbm/ndbm.h" },
         .{ .HAVE_GRP_H, "grp.h" },
-        .{ .HAVE_IEEEFP_H, "ieeefp.h" },
         .{ .HAVE_IO_H, "io.h" },
         .{ .HAVE_INTTYPES_H, "inttypes.h" },
         .{ .HAVE_LANGINFO_H, "langinfo.h" },
@@ -745,7 +775,6 @@ const header_config_set = struct {
         .{ .HAVE_NDIR_H, "ndir.h" },
         .{ .HAVE_NETCAN_CAN_H, "netcan/can.h" },
         .{ .HAVE_PROCESS_H, "process.h" },
-        .{ .HAVE_RPC_RPC_H, "rpc/rpc.h" },
         .{ .HAVE_STROPTS_H, "stropts.h" },
         .{ .HAVE_SYS_AUDIOIO_H, "sys/audioio.h" },
         .{ .HAVE_SYS_BSDTTY_H, "sys/bsdtty.h" },
@@ -769,17 +798,41 @@ const header_config_set = struct {
         .{ .HAVE_ZLIB_H, "zlib.h" },
     };
     pub const @"3.11.13" = concatConfigs(common, .{
+        .{ .HAVE_CRYPT_H, "crypt.h" },
+        .{ .HAVE_IEEEFP_H, "ieeefp.h" },
         .{ .HAVE_MEMORY_H, "memory.h" },
+        .{ .HAVE_RPC_RPC_H, "rpc/rpc.h" },
     });
     pub const @"3.12.11" = concatConfigs(common, .{
+        .{ .HAVE_CRYPT_H, "crypt.h" },
         .{ .HAVE_EDITLINE_READLINE_H, "editline/readline.h" },
+        .{ .HAVE_IEEEFP_H, "ieeefp.h" },
         .{ .HAVE_LINUX_FS_H, "linux/fs.h" },
         .{ .HAVE_MINIX_CONFIG_H, "minix/config.h" },
         .{ .HAVE_NET_ETHERNET_H, "net/ethernet.h" },
         .{ .HAVE_PANEL_H, "panel.h" },
         .{ .HAVE_READLINE_READLINE_H, "readline/readline.h" },
+        .{ .HAVE_RPC_RPC_H, "rpc/rpc.h" },
         .{ .HAVE_STDIO_H, "stdio.h" },
         .{ .HAVE_SYS_PIDFD_H, "sys/pidfd.h" },
+    });
+    pub const @"3.13.5" = concatConfigs(common, .{
+        .{ .HAVE_EDITLINE_READLINE_H, "editline/readline.h" },
+        .{ .HAVE_LINUX_FS_H, "linux/fs.h" },
+        .{ .HAVE_MINIX_CONFIG_H, "minix/config.h" },
+        .{ .HAVE_NCURSESW_CURSES_H, "ncursesw/curses.h" },
+        .{ .HAVE_NCURSESW_NCURSES_H, "ncursesw/ncurses.h" },
+        .{ .HAVE_NCURSESW_PANEL_H, "ncursesw/panel.h" },
+        .{ .HAVE_NCURSES_CURSES_H, "ncurses/curses.h" },
+        .{ .HAVE_NCURSES_NCURSES_H, "ncurses/ncurses.h" },
+        .{ .HAVE_NCURSES_PANEL_H, "ncurses/panel.h" },
+        .{ .HAVE_NETLINK_NETLINK_H, "netlink/netlink.h" },
+        .{ .HAVE_NET_ETHERNET_H, "net/ethernet.h" },
+        .{ .HAVE_PANEL_H, "panel.h" },
+        .{ .HAVE_READLINE_READLINE_H, "readline/readline.h" },
+        .{ .HAVE_STDIO_H, "stdio.h" },
+        .{ .HAVE_SYS_PIDFD_H, "sys/pidfd.h" },
+        .{ .HAVE_SYS_TIMERFD_H, "sys/timerfd.h" },
     });
 };
 
@@ -1041,7 +1094,6 @@ const exe_config_set = struct {
         .{ .HAVE_FSEEK64, "#include <stdio.h>\nint main(){fseek64(0, 0, 0);}" },
         .{ .HAVE_FTELL64, "#include <stdio.h>\nint main(){ftell64(0);}" },
         // Library functions
-        .{ .HAVE_CRYPT_R, "#include <crypt.h>\nint main(){struct crypt_data cd; crypt_r(0, 0, &cd);}" },
         .{ .HAVE_CTERMID_R, "#include <stdio.h>\nint main(){ctermid_r(0, 0);}" },
         .{ .HAVE_EXPLICIT_MEMSET, "#include <string.h>\nint main(){explicit_memset(0, 0, 0);}" },
         // UUID functions
@@ -1203,6 +1255,7 @@ const exe_config_set = struct {
         .{ .HAVE_ZLIB_COPY, "#include <zlib.h>\nint main(){z_stream strm; inflateCopy(&strm, &strm); return 0;}" },
     };
     pub const @"3.11.13" = concatConfigs(common, .{
+        .{ .HAVE_CRYPT_R, "#include <crypt.h>\nint main(){struct crypt_data cd; crypt_r(0, 0, &cd);}" },
         .{ .HAVE_TTYNAME, "#include <unistd.h>\nint main(){ttyname(0);}" },
         .{ .HAVE_LIBGDBM_COMPAT, "#include <gdbm.h>\nint main(){GDBM_FILE gf; return 0;}" },
         .{ .HAVE_LIBNDBM, "#include <ndbm.h>\nint main(){DBM *db; return 0;}" },
@@ -1210,12 +1263,42 @@ const exe_config_set = struct {
         .{ .HAVE_STDARG_PROTOTYPES, "#include <stdarg.h>\nvoid test(int x, ...); int main(){test(1, 2); return 0;} void test(int x, ...){va_list ap; va_start(ap, x); va_end(ap);}" },
     });
     pub const @"3.12.11" = concatConfigs(common, .{
+        .{ .HAVE_CRYPT_R, "#include <crypt.h>\nint main(){struct crypt_data cd; crypt_r(0, 0, &cd);}" },
         .{ .HAVE_FFI_CLOSURE_ALLOC, "#include <ffi.h>\nint main(){ffi_closure_alloc(0, 0);}" },
         .{ .HAVE_FFI_PREP_CIF_VAR, "#include <ffi.h>\nint main(){ffi_prep_cif_var(0, 0, 0, 0, 0, 0);}" },
         .{ .HAVE_FFI_PREP_CLOSURE_LOC, "#include <ffi.h>\nint main(){ffi_prep_closure_loc(0, 0, 0, 0, 0);}" },
         .{ .HAVE_SETNS, "#define _GNU_SOURCE\n#include <sched.h>\nint main(){setns(0, 0);}" },
         .{ .HAVE_TTYNAME_R, "#include <unistd.h>\nint main(){char buf[256]; ttyname_r(0, buf, sizeof(buf));}" },
         .{ .HAVE_UNSHARE, "#define _GNU_SOURCE\n#include <unistd.h>\nint main(){unshare(0);}" },
+    });
+    pub const @"3.13.5" = concatConfigs(common, .{
+        .{ .HAVE_CLOCK_T, "#include <time.h>\nint main(){clock_t c; return 0;}" },
+        .{ .HAVE_CLOSEFROM, "#include <unistd.h>\nint main(){closefrom(0);}" },
+        .{ .HAVE_DECL_UT_NAMESIZE, "#include <utmp.h>\nint main(){return UT_NAMESIZE;}" },
+        .{ .HAVE_FFI_CLOSURE_ALLOC, "#include <ffi.h>\nint main(){ffi_closure_alloc(0, 0);}" },
+        .{ .HAVE_FFI_PREP_CIF_VAR, "#include <ffi.h>\nint main(){ffi_prep_cif_var(0, 0, 0, 0, 0, 0);}" },
+        .{ .HAVE_FFI_PREP_CLOSURE_LOC, "#include <ffi.h>\nint main(){ffi_prep_closure_loc(0, 0, 0, 0, 0);}" },
+        .{ .HAVE_GETGRENT, "#include <grp.h>\nint main(){getgrent();}" },
+        .{ .HAVE_GETLOGIN_R, "#include <unistd.h>\nint main(){char buf[256]; getlogin_r(buf, sizeof(buf));}" },
+        .{ .HAVE_GRANTPT, "#include <stdlib.h>\nint main(){grantpt(0);}" },
+        .{ .HAVE_MAXLOGNAME, "#include <sys/param.h>\nint main(){return MAXLOGNAME;}" },
+        .{ .HAVE_NCURSES, "#include <curses.h>\nint main(){initscr(); return 0;}" },
+        .{ .HAVE_PANEL, "#include <panel.h>\nint main(){PANEL *p; return 0;}" },
+        .{ .HAVE_PANELW, "#include <panel.h>\nint main(){PANEL *p; return 0;}" },
+        .{ .HAVE_POSIX_OPENPT, "#include <stdlib.h>\nint main(){posix_openpt(0);}" },
+        .{ .HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP, "#include <spawn.h>\nint main(){posix_spawn_file_actions_t actions; posix_spawn_file_actions_addclosefrom_np(&actions, 0);}" },
+        .{ .HAVE_PROCESS_VM_READV, "#include <sys/uio.h>\nint main(){process_vm_readv(0, 0, 0, 0, 0, 0);}" },
+        .{ .HAVE_PTHREAD_COND_TIMEDWAIT_RELATIVE_NP, "#include <pthread.h>\nint main(){pthread_cond_t cond; pthread_mutex_t mutex; struct timespec ts; pthread_cond_timedwait_relative_np(&cond, &mutex, &ts);}" },
+        .{ .HAVE_PTSNAME, "#include <stdlib.h>\nint main(){ptsname(0);}" },
+        .{ .HAVE_PTSNAME_R, "#include <stdlib.h>\nint main(){char buf[256]; ptsname_r(0, buf, sizeof(buf));}" },
+        .{ .HAVE_SETNS, "#define _GNU_SOURCE\n#include <sched.h>\nint main(){setns(0, 0);}" },
+        .{ .HAVE_SOCKLEN_T, "#include <sys/socket.h>\nint main(){socklen_t len; return 0;}" },
+        .{ .HAVE_TIMERFD_CREATE, "#include <sys/timerfd.h>\nint main(){timerfd_create(0, 0);}" },
+        .{ .HAVE_TTYNAME_R, "#include <unistd.h>\nint main(){char buf[256]; ttyname_r(0, buf, sizeof(buf));}" },
+        .{ .HAVE_UNLOCKPT, "#include <stdlib.h>\nint main(){unlockpt(0);}" },
+        .{ .HAVE_UNSHARE, "#define _GNU_SOURCE\n#include <sched.h>\nint main(){unshare(0);}" },
+        .{ .HAVE_UT_NAMESIZE, "#include <utmp.h>\nint main(){struct utmp ut; return sizeof(ut.ut_name);}" },
+        .{ .HAVE___UINT128_T, "int main(){__uint128_t x = 0; return (int)x;}" },
     });
 };
 
@@ -1399,15 +1482,46 @@ fn addPyconfig(
             .__STDC_WANT_LIB_EXT2__ = null,
             .__STDC_WANT_MATH_SPEC_FUNCS__ = null,
         }),
+        .@"3.13.5" => config_header.addValues(.{
+            .ALIGNOF_MAX_ALIGN_T = @as(u32, switch (t.cpu.arch) {
+                .x86_64, .aarch64 => 16,
+                .x86, .arm => 8,
+                else => 8,
+            }),
+
+            // ncurses library (static configuration, not function test)
+            .HAVE_NCURSESW = null,
+
+            // Performance trampoline feature
+            .PY_HAVE_PERF_TRAMPOLINE = null,
+
+            ._HPUX_ALT_XOPEN_SOCKET_API = null,
+            ._OPENBSD_SOURCE = null,
+
+            // C standard feature test macros (all set to null as they're optional)
+            .__STDC_WANT_IEC_60559_ATTRIBS_EXT__ = null,
+            .__STDC_WANT_IEC_60559_BFP_EXT__ = null,
+            .__STDC_WANT_IEC_60559_DFP_EXT__ = null,
+            .__STDC_WANT_IEC_60559_FUNCS_EXT__ = null,
+            .__STDC_WANT_IEC_60559_TYPES_EXT__ = null,
+            .__STDC_WANT_LIB_EXT2__ = null,
+            .__STDC_WANT_MATH_SPEC_FUNCS__ = null,
+
+            .Py_GIL_DISABLED = null, // Optional GIL disabling feature
+            .Py_RL_STARTUP_HOOK_TAKES_ARGS = null, // Readline startup hook feature
+            .WITH_MIMALLOC = null, // Optional mimalloc memory allocator
+        }),
     }
 
     const header_configs: []const Config = switch (version) {
         .@"3.11.13" => &header_config_set.@"3.11.13",
         .@"3.12.11" => &header_config_set.@"3.12.11",
+        .@"3.13.5" => &header_config_set.@"3.13.5",
     };
     const exe_configs: []const Config = switch (version) {
         .@"3.11.13" => &exe_config_set.@"3.11.13",
         .@"3.12.11" => &exe_config_set.@"3.12.11",
+        .@"3.13.5" => &exe_config_set.@"3.13.5",
     };
 
     {
@@ -1557,6 +1671,33 @@ const python_src = struct {
         "Python/tracemalloc.c",
         "Python/perf_trampoline.c",
     };
+    pub const @"3.13.5" = common ++ .{
+        "Python/assemble.c",
+        "Python/brc.c",
+        "Python/critical_section.c",
+        "Python/crossinterp.c",
+        "Python/flowgraph.c",
+        "Python/gc.c",
+        "Python/gc_free_threading.c",
+        "Python/gc_gil.c",
+        "Python/ceval_gil.c",
+        "Python/instrumentation.c",
+        "Python/interpconfig.c",
+        "Python/instruction_sequence.c",
+        "Python/intrinsics.c",
+        "Python/jit.c",
+        "Python/legacy_tracing.c",
+        "Python/lock.c",
+        "Python/object_stack.c",
+        "Python/optimizer.c",
+        "Python/optimizer_analysis.c",
+        "Python/optimizer_symbols.c",
+        "Python/parking_lot.c",
+        "Python/qsbr.c",
+        "Python/tracemalloc.c",
+        "Python/perf_trampoline.c",
+        "Python/perf_jit_trampoline.c",
+    };
 };
 
 const object_src = struct {
@@ -1581,7 +1722,6 @@ const object_src = struct {
         "Objects/floatobject.c",
         "Objects/frameobject.c",
         "Objects/funcobject.c",
-        "Objects/interpreteridobject.c",
         "Objects/iterobject.c",
         "Objects/listobject.c",
         "Objects/longobject.c",
@@ -1607,27 +1747,49 @@ const object_src = struct {
     };
     pub const @"3.11.13" = common ++ .{
         "Objects/accu.c",
+        "Objects/interpreteridobject.c",
     };
     pub const @"3.12.11" = common ++ .{
+        "Objects/interpreteridobject.c",
+        "Objects/typevarobject.c",
+    };
+    pub const @"3.13.5" = common ++ .{
         "Objects/typevarobject.c",
     };
 };
 
-const parser_src = [_][]const u8{
-    // PEGEN_OBJS
-    "Parser/pegen.c",
-    "Parser/pegen_errors.c",
-    "Parser/action_helpers.c",
-    "Parser/parser.c",
-    "Parser/string_parser.c",
-    "Parser/peg_api.c",
+const parser_src = struct {
+    const common = [_][]const u8{
+        // PEGEN_OBJS
+        "Parser/pegen.c",
+        "Parser/pegen_errors.c",
+        "Parser/action_helpers.c",
+        "Parser/parser.c",
+        "Parser/string_parser.c",
+        "Parser/peg_api.c",
 
-    // POBJS
-    "Parser/token.c",
+        // POBJS
+        "Parser/token.c",
 
-    //
-    "Parser/myreadline.c",
-    "Parser/tokenizer.c",
+        //
+        "Parser/myreadline.c",
+    };
+    pub const @"3.11.13" = common ++ .{
+        "Parser/tokenizer.c",
+    };
+    pub const @"3.12.11" = common ++ .{
+        "Parser/tokenizer.c",
+    };
+    pub const @"3.13.5" = common ++ .{
+        "Parser/lexer/buffer.c",
+        "Parser/lexer/lexer.c",
+        "Parser/lexer/state.c",
+        "Parser/tokenizer/file_tokenizer.c",
+        "Parser/tokenizer/readline_tokenizer.c",
+        "Parser/tokenizer/string_tokenizer.c",
+        "Parser/tokenizer/utf8_tokenizer.c",
+        "Parser/tokenizer/helpers.c",
+    };
 };
 
 const module_src = [_][]const u8{
@@ -1636,8 +1798,9 @@ const module_src = [_][]const u8{
 };
 
 const library_src_omit_frozen = struct {
-    pub const @"3.11.13" = parser_src ++ object_src.@"3.11.13" ++ python_src.@"3.11.13" ++ module_src;
-    pub const @"3.12.11" = parser_src ++ object_src.@"3.12.11" ++ python_src.@"3.12.11" ++ module_src;
+    pub const @"3.11.13" = parser_src.@"3.11.13" ++ object_src.@"3.11.13" ++ python_src.@"3.11.13" ++ module_src;
+    pub const @"3.12.11" = parser_src.@"3.12.11" ++ object_src.@"3.12.11" ++ python_src.@"3.12.11" ++ module_src;
+    pub const @"3.13.5" = parser_src.@"3.13.5" ++ object_src.@"3.13.5" ++ python_src.@"3.13.5" ++ module_src;
 };
 
 const frozen_modules = [_][]const u8{
