@@ -33,4 +33,6 @@ jobs:
       - run: |
           zig build ci --summary all
       - run: |
+          zig build ci -Dversion=3.12.11 --summary all
+      - run: |
           zig build ci -Dversion=3.11.13 --summary all
