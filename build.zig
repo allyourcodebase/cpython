@@ -316,6 +316,7 @@ fn addMakesetup(
         ._elementtree = false,
         ._crypt = false,
         .nis = false,
+        ._ctypes = true,
         ._curses = false,
         ._curses_panel = false,
         ._sqlite3 = false,
@@ -336,13 +337,11 @@ fn addMakesetup(
         ._xxsubinterpreters = false,
     };
     const @"stdlib_modules_3.11.13" = .{
-        ._ctypes = true,
         ._typing = true,
         ._sha256 = true,
         ._sha512 = true,
     };
     const @"stdlib_modules_3.12.11" = .{
-        ._ctypes = false,
         ._sha2 = false,
         .xxsubtype = false,
         ._xxinterpchannels = false,
@@ -1636,9 +1635,22 @@ const module_src = [_][]const u8{
     "Modules/gcmodule.c",
 };
 
+const extra_src = struct {
+    // Setup.stdlib is commented out regardless of ctypes module config, so we
+    // need to copy the sources it adds here
+    pub const @"3.11.13" = [_][]const u8{
+        "Modules/_ctypes/_ctypes.c",
+        "Modules/_ctypes/callbacks.c",
+        "Modules/_ctypes/callproc.c",
+        "Modules/_ctypes/stgdict.c",
+        "Modules/_ctypes/cfield.c",
+    };
+    pub const @"3.12.11" = [_][]const u8{};
+};
+
 const library_src_omit_frozen = struct {
-    pub const @"3.11.13" = parser_src ++ object_src.@"3.11.13" ++ python_src.@"3.11.13" ++ module_src;
-    pub const @"3.12.11" = parser_src ++ object_src.@"3.12.11" ++ python_src.@"3.12.11" ++ module_src;
+    pub const @"3.11.13" = parser_src ++ object_src.@"3.11.13" ++ python_src.@"3.11.13" ++ module_src ++ extra_src.@"3.11.13";
+    pub const @"3.12.11" = parser_src ++ object_src.@"3.12.11" ++ python_src.@"3.12.11" ++ module_src ++ extra_src.@"3.12.11";
 };
 
 const frozen_modules = [_][]const u8{
