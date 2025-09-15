@@ -7,7 +7,7 @@ pub fn main() !void {
     // no need to free
 
     if (all_args.len <= 1) {
-        try std.io.getStdErr().writer().writeAll("usage: replace IN_FILE OUT_FILE NAME=VALUE...\n");
+        try std.fs.File.stderr().writeAll("usage: replace IN_FILE OUT_FILE NAME=VALUE...\n");
         std.process.exit(0xff);
     }
     const args = all_args[1..];
@@ -41,8 +41,9 @@ pub fn main() !void {
 
     var out_file = try std.fs.cwd().createFile(out_path, .{});
     defer out_file.close();
-    var bw = std.io.bufferedWriter(out_file.writer());
-    const writer = bw.writer();
+    var out_file_buffer: [4096]u8 = undefined;
+    var bw = out_file.writer(&out_file_buffer);
+    const writer = &bw.interface;
 
     var missing_count: usize = 0;
     var offset: usize = 0;
@@ -65,7 +66,7 @@ pub fn main() !void {
         offset = end + 1;
     }
     try writer.writeAll(in[offset..]);
-    try bw.flush();
+    try writer.flush();
     if (missing_count > 0) errExit("{} missing variable(s) for template '{s}'", .{ missing_count, in_path });
 
     var unused_count: usize = 0;

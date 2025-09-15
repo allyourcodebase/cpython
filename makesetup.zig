@@ -7,7 +7,7 @@ pub fn main() !void {
     // no need to free
 
     if (all_args.len <= 1) {
-        try std.io.getStdErr().writer().writeAll("usage: makesetup UPSTREAM_SRC OUT_DIR SETUP_FILES...\n");
+        try std.fs.File.stderr().writeAll("usage: makesetup UPSTREAM_SRC OUT_DIR SETUP_FILES...\n");
         std.process.exit(0xff);
     }
     const args = all_args[1..];
@@ -36,8 +36,9 @@ pub fn main() !void {
     {
         var file = try out_dir.createFile("config.c", .{});
         defer file.close();
-        var bw = std.io.bufferedWriter(file.writer());
-        const writer = bw.writer();
+        var file_buffer: [4096]u8 = undefined;
+        var bw = file.writer(&file_buffer);
+        const writer = &bw.interface;
         try writer.print("/* Generated automatically from {s} by makesetup. */\n", .{config_in_path});
         var lines = std.mem.splitScalar(u8, config_in, '\n');
         while (lines.next()) |line| {
@@ -57,14 +58,15 @@ pub fn main() !void {
             try writer.writeAll(line);
             try writer.writeByte('\n');
         }
-        try bw.flush();
+        try writer.flush();
     }
 
     {
         var out_file = try out_dir.createFile("module-compile-args.txt", .{});
         defer out_file.close();
-        var bw = std.io.bufferedWriter(out_file.writer());
-        const writer = bw.writer();
+        var out_file_buffer: [4096]u8 = undefined;
+        var bw = out_file.writer(&out_file_buffer);
+        const writer = &bw.interface;
 
         var it = setup.modules.iterator();
         while (it.next()) |entry| {
@@ -79,7 +81,7 @@ pub fn main() !void {
                 .include => |inc| try writer.print("{s}-I{s}\n", .{ prefix, inc }),
             };
         }
-        try bw.flush();
+        try writer.flush();
     }
 }
 

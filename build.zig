@@ -432,17 +432,11 @@ fn addPythonExe(
 ) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = args.name,
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
     });
-
-    switch (args.pyconfig.version) {
-        .@"3.11.13" => {
-            // workaround dictobject.c memcpy alignment issue
-            exe.root_module.sanitize_c = false;
-        },
-        .@"3.12.11" => {},
-    }
 
     exe.root_module.addCMacro("Py_BUILD_CORE", "");
     exe.root_module.addCMacro("_GNU_SOURCE", "");
@@ -488,12 +482,28 @@ fn addPythonExe(
         },
     }
 
-    const flags_common = [_][]const u8{
+    const common_flags = [_][]const u8{
         "-fwrapv",
         "-std=c11",
         "-fvisibility=hidden",
         "-DVPATH=\"\"",
     };
+
+    var flags: std.ArrayList([]const u8) = .empty;
+    defer flags.deinit(b.allocator);
+    flags.appendSlice(b.allocator, &common_flags) catch @panic("OOM");
+    switch (args.pyconfig.version) {
+        .@"3.11.13" => {
+            // workaround dictobject.c memcpy alignment issue
+            flags.append(b.allocator, "-fno-sanitize=alignment") catch @panic("OOM");
+        },
+        .@"3.12.11" => {
+            // Fixes some null pointer related ubsan checks when building with zig 0.15.1
+            flags.append(b.allocator, "-fno-delete-null-pointer-checks") catch @panic("OOM");
+            // Fixes some null pointer overflow  issues flagged in UBSan triggered by deepfreeze.py
+            flags.append(b.allocator, "-fno-sanitize=pointer-overflow") catch @panic("OOM");
+        },
+    }
 
     {
         const AddModules = struct {
@@ -513,7 +523,7 @@ fn addPythonExe(
                 };
                 defer step.owner.allocator.free(module_compile_args);
 
-                var files: std.ArrayListUnmanaged([]const u8) = .{};
+                var files: std.ArrayList([]const u8) = .{};
                 defer files.deinit(step.owner.allocator);
 
                 var line_it = std.mem.splitScalar(u8, module_compile_args, '\n');
@@ -537,7 +547,7 @@ fn addPythonExe(
                 self.exe.root_module.addCSourceFiles(.{
                     .root = self.upstream.path("."),
                     .files = files.items,
-                    .flags = &flags_common,
+                    .flags = &common_flags,
                 });
             }
         }.make;
@@ -593,44 +603,52 @@ fn addPythonExe(
                 },
             }),
         },
-        .flags = &flags_common,
+        .flags = flags.items,
     });
 
     exe.addCSourceFile(.{
         .file = args.makesetup_out.path(b, "config.c"),
-        .flags = &flags_common,
+        .flags = flags.items,
     });
 
+    var get_path_flags: std.ArrayList([]const u8) = .empty;
+    defer get_path_flags.deinit(b.allocator);
+    get_path_flags.appendSlice(b.allocator, flags.items) catch @panic("OOM");
+    get_path_flags.appendSlice(b.allocator, &.{
+        "-DPREFIX=\"\"",
+        "-DEXEC_PREFIX=\"\"",
+        b.fmt("-DVERSION=\"{s}\"", .{args.pyconfig.version.libName()}),
+        "-DPLATLIBDIR=\"lib\"",
+    }) catch @panic("OOM");
     switch (args.stage) {
         .freeze_module => {},
         .bootstrap, .final => exe.addCSourceFile(.{
             .file = upstream.path("Modules/getpath.c"),
-            .flags = &(flags_common ++ [_][]const u8{
-                "-DPREFIX=\"\"",
-                "-DEXEC_PREFIX=\"\"",
-                b.fmt("-DVERSION=\"{s}\"", .{args.pyconfig.version.libName()}),
-                "-DPLATLIBDIR=\"lib\"",
-            }),
+            .flags = get_path_flags.items,
         }),
     }
     switch (args.stage) {
         .freeze_module, .bootstrap => {},
         .final => |final| {
-            exe.addCSourceFile(.{ .file = final.deepfreeze_c, .flags = &flags_common });
+            exe.addCSourceFile(.{ .file = final.deepfreeze_c, .flags = flags.items });
         },
     }
 
     if (target.result.os.tag == .windows) {
         exe.addCSourceFile(.{
             .file = upstream.path("Python/dynload_win.c"),
-            .flags = &flags_common,
+            .flags = flags.items,
         });
     } else {
+        var dynload_flags: std.ArrayList([]const u8) = .empty;
+        defer dynload_flags.deinit(b.allocator);
+        dynload_flags.appendSlice(b.allocator, flags.items) catch @panic("OOM");
+        dynload_flags.appendSlice(b.allocator, &.{
+            "-DSOABI=\"cpython-311-x86_64-linux-gnu\"",
+        }) catch @panic("OOM");
         exe.addCSourceFile(.{
             .file = upstream.path("Python/dynload_shlib.c"),
-            .flags = &(flags_common ++ .{
-                "-DSOABI=\"cpython-311-x86_64-linux-gnu\"",
-            }),
+            .flags = dynload_flags.items,
         });
     }
 
@@ -1235,7 +1253,7 @@ fn addPyconfig(
     };
 
     const config_header = b.addConfigHeader(.{
-        .style = .{ .autoconf = upstream.path("pyconfig.h.in") },
+        .style = .{ .autoconf_undef = upstream.path("pyconfig.h.in") },
         .include_path = "pyconfig.h",
     }, .{
         .ALIGNOF_LONG = 8,
