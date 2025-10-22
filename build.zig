@@ -1,8 +1,10 @@
 pub const Version = enum {
+    @"3.6",
     @"3.11.13",
     @"3.12.11",
     pub fn libName(self: Version) []const u8 {
         return switch (self) {
+            .@"3.6" => "3.6",
             .@"3.11.13" => "3.11",
             .@"3.12.11" => "3.12",
         };
@@ -59,6 +61,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     const upstream: *std.Build.Dependency = switch (version) {
+        .@"3.6" => if (b.lazyDependency("upstream_3.6", .{})) |d| d else noUpstream(b),
         .@"3.11.13" => if (b.lazyDependency("upstream_3.11.13", .{})) |d| d else noUpstream(b),
         .@"3.12.11" => if (b.lazyDependency("upstream_3.12.11", .{})) |d| d else noUpstream(b),
     };
@@ -367,6 +370,7 @@ fn addMakesetup(
         replace.addArg("MODULE_BUILDTYPE=static");
         addReplaceModuleArgs(b, replace, @TypeOf(stdlib_modules_common), stdlib_modules_common);
         switch (version) {
+            .@"3.6" => {},
             .@"3.11.13" => addReplaceModuleArgs(b, replace, @TypeOf(@"stdlib_modules_3.11.13"), @"stdlib_modules_3.11.13"),
             .@"3.12.11" => {
                 replace.addArg("MODULE__CTYPES_MALLOC_CLOSURE=");
@@ -437,6 +441,7 @@ fn addPythonExe(
     });
 
     switch (args.pyconfig.version) {
+        .@"3.6" => {},
         .@"3.11.13" => {
             // workaround dictobject.c memcpy alignment issue
             exe.root_module.sanitize_c = false;
@@ -450,6 +455,7 @@ fn addPythonExe(
         .Debug => {},
         .ReleaseSafe, .ReleaseSmall, .ReleaseFast => {
             const release_date = switch (args.pyconfig.version) {
+                .@"3.6" => "December 28, 2021",
                 .@"3.11.13" => "June 3, 2025",
                 .@"3.12.11" => "June 3, 2025",
             };
@@ -567,6 +573,7 @@ fn addPythonExe(
                     "Modules/getpath_noop.c",
                 },
                 switch (args.pyconfig.version) {
+                    .@"3.6" => &library_src_omit_frozen.@"3.6",
                     .@"3.11.13" => &library_src_omit_frozen.@"3.11.13",
                     .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
                 },
@@ -577,6 +584,7 @@ fn addPythonExe(
                     "Modules/getbuildinfo.c",
                 },
                 switch (args.pyconfig.version) {
+                    .@"3.6" => &library_src_omit_frozen.@"3.6",
                     .@"3.11.13" => &library_src_omit_frozen.@"3.11.13",
                     .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
                 },
@@ -588,6 +596,7 @@ fn addPythonExe(
                     "Python/frozen.c",
                 },
                 switch (args.pyconfig.version) {
+                    .@"3.6" => &library_src_omit_frozen.@"3.6",
                     .@"3.11.13" => &library_src_omit_frozen.@"3.11.13",
                     .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
                 },
@@ -769,6 +778,7 @@ const header_config_set = struct {
         .{ .HAVE_UUID_UUID_H, "uuid/uuid.h" },
         .{ .HAVE_ZLIB_H, "zlib.h" },
     };
+    pub const @"3.6" = concatConfigs(common, .{});
     pub const @"3.11.13" = concatConfigs(common, .{
         .{ .HAVE_MEMORY_H, "memory.h" },
     });
@@ -1203,6 +1213,7 @@ const exe_config_set = struct {
         .{ .HAVE_WORKING_TZSET, "#include <time.h>\nint main(){tzset(); return 0;}" },
         .{ .HAVE_ZLIB_COPY, "#include <zlib.h>\nint main(){z_stream strm; inflateCopy(&strm, &strm); return 0;}" },
     };
+    pub const @"3.6" = concatConfigs(common, .{});
     pub const @"3.11.13" = concatConfigs(common, .{
         .{ .HAVE_TTYNAME, "#include <unistd.h>\nint main(){ttyname(0);}" },
         .{ .HAVE_LIBGDBM_COMPAT, "#include <gdbm.h>\nint main(){GDBM_FILE gf; return 0;}" },
@@ -1370,6 +1381,7 @@ fn addPyconfig(
         .HAVE_RL_COMPDISP_FUNC_T = null,
     });
     switch (version) {
+        .@"3.6" => {},
         .@"3.11.13" => config_header.addValues(.{
             .PY_FORMAT_SIZE_T = "z",
             .TIME_WITH_SYS_TIME = 1,
@@ -1403,10 +1415,12 @@ fn addPyconfig(
     }
 
     const header_configs: []const Config = switch (version) {
+        .@"3.6" => &header_config_set.@"3.6",
         .@"3.11.13" => &header_config_set.@"3.11.13",
         .@"3.12.11" => &header_config_set.@"3.12.11",
     };
     const exe_configs: []const Config = switch (version) {
+        .@"3.6" => &exe_config_set.@"3.6",
         .@"3.11.13" => &exe_config_set.@"3.11.13",
         .@"3.12.11" => &exe_config_set.@"3.12.11",
     };
@@ -1547,6 +1561,7 @@ const python_src = struct {
         "Python/fileutils.c",
         "Python/suggestions.c",
     };
+    pub const @"3.6" = common;
     pub const @"3.11.13" = common;
     pub const @"3.12.11" = common ++ .{
         "Python/assemble.c",
@@ -1606,6 +1621,7 @@ const object_src = struct {
         "Objects/unionobject.c",
         "Objects/weakrefobject.c",
     };
+    pub const @"3.6" = common ++ .{};
     pub const @"3.11.13" = common ++ .{
         "Objects/accu.c",
     };
@@ -1637,6 +1653,7 @@ const module_src = [_][]const u8{
 };
 
 const library_src_omit_frozen = struct {
+    pub const @"3.6" = parser_src ++ object_src.@"3.6" ++ python_src.@"3.6" ++ module_src;
     pub const @"3.11.13" = parser_src ++ object_src.@"3.11.13" ++ python_src.@"3.11.13" ++ module_src;
     pub const @"3.12.11" = parser_src ++ object_src.@"3.12.11" ++ python_src.@"3.12.11" ++ module_src;
 };

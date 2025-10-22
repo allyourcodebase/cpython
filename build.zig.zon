@@ -4,6 +4,11 @@
     .version = "0.0.0",
     .minimum_zig_version = "0.14.1",
     .dependencies = .{
+        .@"upstream_3.6" = .{
+            .url = "git+https://github.com/python/cpython#8d999cbf4adea053be6dbb612b9844635c4dfb8e",
+            .hash = "N-V-__8AAMED3ARJaCyFG2S5U8Dz84IoEKHP_ZLjRG-3Qe3O",
+            .lazy = true,
+        },
         .@"upstream_3.11.13" = .{
             .url = "git+https://github.com/python/cpython#498b971ea3673012a1d4b21860b229d55fc6e575",
             .hash = "N-V-__8AACr32QWySXRzLeDQuZNoyM6FlWz3U4smc4qJ0EXe",
