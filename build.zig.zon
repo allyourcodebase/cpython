@@ -29,6 +29,7 @@
         "build.zig.zon",
         "makesetup.zig",
         "replace.zig",
+        "systemquery.zig",
         "CompileCheck.zig",
     },
 }

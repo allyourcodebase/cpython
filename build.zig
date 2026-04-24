@@ -1412,13 +1412,34 @@ fn addPyconfig(
         .@"3.12.11" => &exe_config_set.@"3.12.11",
     };
 
+    const libc_dirs = try std.zig.LibCDirs.detect(
+        b.allocator,
+        b.graph.io,
+        b.graph.zig_lib_directory.path.?,
+        &target.result,
+        target.query.isNativeAbi(),
+        true, // link_libc
+        null, // libc_installation
+        &b.graph.environ_map,
+    );
+    switch (version) {
+        inline else => |v| {
+            const Enum = @field(header_enum, @tagName(v));
+            const headers = try systemquery.HeaderSet(Enum).scanDirs(b.graph.io, libc_dirs.libc_include_dir_list);
+            for (header_configs) |config| {
+                const header = std.meta.stringToEnum(Enum, config.string).?;
+                const assume = if (header == .@"zlib.h") (libs.zlib != null) else false;
+                const found = headers.contains(header);
+                config_header.addValue(config.name, ?u1, if (found or assume) 1 else null);
+            }
+        },
+    }
+
     {
         const AddValues = struct {
             step: std.Build.Step,
             version: Version,
             config_header: *std.Build.Step.ConfigHeader,
-            header_configs: []const Config,
-            header_checks: []*CompileCheck,
             exe_configs: []const Config,
             exe_checks: []*CompileCheck,
         };
@@ -1426,9 +1447,6 @@ fn addPyconfig(
             fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
                 _ = options;
                 const self: *AddValues = @fieldParentPtr("step", step);
-                for (self.header_configs, self.header_checks) |config, check| {
-                    self.config_header.addValue(config.name, ?u1, check.haveHeader(step));
-                }
                 for (self.exe_configs, self.exe_checks) |config, check| {
                     self.config_header.addValue(config.name, ?u1, try check.compiled(step, .{}));
                 }
@@ -1444,19 +1462,11 @@ fn addPyconfig(
             }),
             .version = version,
             .config_header = config_header,
-            .header_configs = header_configs,
-            .header_checks = b.allocator.alloc(*CompileCheck, header_configs.len) catch @panic("OOM"),
             .exe_configs = exe_configs,
             .exe_checks = b.allocator.alloc(*CompileCheck, exe_configs.len) catch @panic("OOM"),
         };
-        for (header_configs, add_values.header_checks) |config, *check| {
-            check.* = CompileCheck.create(b, target, .{ .header = config.string });
-            if (libs.zlib) |zlib| check.*.linkLibrary(zlib);
-            if (libs.openssl) |openssl| check.*.linkLibrary(openssl);
-            add_values.step.dependOn(&check.*.step);
-        }
         for (exe_configs, add_values.exe_checks) |config, *check| {
-            check.* = CompileCheck.create(b, target, .{ .exe = config.string });
+            check.* = CompileCheck.create(b, target, config.string);
             if (libs.zlib) |zlib| check.*.linkLibrary(zlib);
             if (libs.openssl) |openssl| check.*.linkLibrary(openssl);
             add_values.step.dependOn(&check.*.step);
@@ -1476,6 +1486,23 @@ fn have(x: bool) ?u1 {
 }
 
 const Config = struct { name: []const u8, string: []const u8 };
+
+const header_enum = struct {
+    pub const @"3.11.13" = HeaderEnum(header_config_set.@"3.11.13");
+    pub const @"3.12.11" = HeaderEnum(header_config_set.@"3.12.11");
+};
+
+fn HeaderEnum(comptime configs: anytype) type {
+    const TagInt = std.math.IntFittingRange(0, configs.len - 1);
+    var names: [configs.len][]const u8 = undefined;
+    var values: [configs.len]TagInt = undefined;
+    for (configs, 0..) |config, i| {
+        names[i] = config.string;
+        values[i] = i;
+    }
+    return @Enum(TagInt, .exhaustive, &names, &values);
+}
+
 fn concatConfigs(comptime first: anytype, comptime second: anytype) [std.meta.fields(@TypeOf(first)).len + std.meta.fields(@TypeOf(second)).len]Config {
     const first_len = std.meta.fields(@TypeOf(first)).len;
     var result: [first_len + std.meta.fields(@TypeOf(second)).len]Config = undefined;
@@ -1804,4 +1831,5 @@ fn concat(allocator: std.mem.Allocator, lists: []const []const []const u8) []con
 }
 
 const std = @import("std");
+const systemquery = @import("systemquery.zig");
 const CompileCheck = @import("CompileCheck.zig");

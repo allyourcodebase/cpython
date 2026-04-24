@@ -4,7 +4,6 @@ const std = @import("std");
 
 step: std.Build.Step,
 target: std.Build.ResolvedTarget,
-kind: Kind,
 source_content: []const u8,
 source_path: std.Build.LazyPath,
 result: ?Result = null,
@@ -22,54 +21,27 @@ const Result = union(enum) {
     },
 };
 
-pub const Kind = union(enum) {
-    exe: []const u8,
-    header: []const u8,
-};
-
-pub fn create(b: *std.Build, target: std.Build.ResolvedTarget, kind: Kind) *CompileCheck {
+pub fn create(b: *std.Build, target: std.Build.ResolvedTarget, source: []const u8) *CompileCheck {
     const write_files = b.addWriteFiles();
-    const source_duped = switch (kind) {
-        .exe => |src| b.dupe(src),
-        .header => |h| b.fmt("#include <{s}>", .{h}),
-    };
+    const source_duped = b.dupe(source);
     const source_path = write_files.add(
-        switch (kind) {
-            .exe => "compilecheck-exe.c",
-            .header => "compilecheck-header.c",
-        },
+        "compilecheck.c",
         source_duped,
     );
     const check = b.allocator.create(CompileCheck) catch @panic("OOM");
     check.* = .{
         .step = std.Build.Step.init(.{
             .id = .custom,
-            .name = switch (kind) {
-                .exe => "compile check exe",
-                .header => |h| b.fmt("compile check header '{s}'", .{h}),
-            },
+            .name = "compile check exe",
             .owner = b,
             .makeFn = make,
         }),
         .target = target,
-        .kind = switch (kind) {
-            .exe => .{ .exe = source_duped },
-            .header => |h| .{ .header = b.dupe(h) },
-        },
         .source_content = source_duped,
         .source_path = source_path,
     };
     source_path.addStepDependencies(&check.step);
     return check;
-}
-
-pub fn haveHeader(check: *CompileCheck, asking_step: *std.Build.Step) ?u1 {
-    std.debug.assert(check.kind == .header);
-    if (!dependsOn(asking_step, &check.step)) std.debug.panic("haveHeader called on CompileCheck without a dependency", .{});
-    return switch (check.result.?) {
-        .pass => 1,
-        .fail => null,
-    };
 }
 
 pub fn compiled(
@@ -81,7 +53,6 @@ pub fn compiled(
         allow_undeclared_identifier: bool = true,
     },
 ) !?u1 {
-    std.debug.assert(check.kind == .exe);
     if (!dependsOn(asking_step, &check.step)) std.debug.panic("compiled called on CompileCheck without a dependency", .{});
     return switch (check.result.?) {
         .pass => 1,
@@ -151,10 +122,7 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
         var zig_args: std.array_list.Managed([]const u8) = .init(b.allocator);
         defer zig_args.deinit();
         try zig_args.append(b.graph.zig_exe);
-        try zig_args.append(switch (check.kind) {
-            .exe => "build-exe",
-            .header => "build-obj",
-        });
+        try zig_args.append("build-exe");
         try zig_args.append("-lc");
         try zig_args.append("-target");
         try zig_args.append(try check.target.query.zigTriple(b.allocator));
@@ -162,61 +130,47 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
         for (check.include_dirs.items) |include_dir| {
             try include_dir.appendZigProcessFlags(b, &zig_args, step);
         }
-        const links = switch (check.kind) {
-            .exe => true,
-            .header => false,
-        };
-        if (links) {
-            for (check.link_objects.items) |link_object| {
-                switch (link_object) {
-                    .other_step => |other| {
-                        switch (other.kind) {
-                            .exe => return step.fail("cannot link with an executable build artifact", .{}),
-                            .@"test", .test_obj => return step.fail("cannot link with a test", .{}),
-                            .obj => {
-                                try zig_args.append(other.getEmittedBin().getPath2(b, step));
-                            },
-                            .lib => {
-                                const other_produces_implib = other.producesImplib();
-                                // For DLLs, we must link against the implib.
-                                // For everything else, we directly link
-                                // against the library file.
-                                const full_path_lib = if (other_produces_implib)
-                                    getGeneratedFilePath(other, "generated_implib", step)
-                                else
-                                    getGeneratedFilePath(other, "generated_bin", step);
-                                try zig_args.append(full_path_lib);
-                            },
-                        }
-                    },
-                    else => |o| std.debug.panic("todo: handle link object {t}", .{o}),
-                }
+
+        for (check.link_objects.items) |link_object| {
+            switch (link_object) {
+                .other_step => |other| {
+                    switch (other.kind) {
+                        .exe => return step.fail("cannot link with an executable build artifact", .{}),
+                        .@"test", .test_obj => return step.fail("cannot link with a test", .{}),
+                        .obj => {
+                            try zig_args.append(other.getEmittedBin().getPath2(b, step));
+                        },
+                        .lib => {
+                            const other_produces_implib = other.producesImplib();
+                            // For DLLs, we must link against the implib.
+                            // For everything else, we directly link
+                            // against the library file.
+                            const full_path_lib = if (other_produces_implib)
+                                getGeneratedFilePath(other, "generated_implib", step)
+                            else
+                                getGeneratedFilePath(other, "generated_bin", step);
+                            try zig_args.append(full_path_lib);
+                        },
+                    }
+                },
+                else => |o| std.debug.panic("todo: handle link object {t}", .{o}),
             }
         }
-        switch (check.kind) {
-            .exe => {
-                var rand_int: u64 = undefined;
-                b.graph.io.random(std.mem.asBytes(&rand_int));
-                const path = "tmp" ++ std.fs.path.sep_str ++ std.fmt.hex(rand_int);
-                b.cache_root.handle.createDirPath(b.graph.io, path) catch |err| return step.fail(
-                    "create dir '{f}{s}' failed with {t}",
-                    .{ b.cache_root, path, err },
-                );
-                const emit_bin_path = try b.cache_root.join(b.allocator, &.{ path, "compilecheck-exe" });
-                try zig_args.append(b.fmt("-femit-bin={s}", .{emit_bin_path}));
-                const result = try std.process.run(b.allocator, b.graph.io, .{
-                    .argv = zig_args.items,
-                });
-                try b.cache_root.handle.deleteTree(b.graph.io, path);
-                break :blk result;
-            },
-            .header => {
-                try zig_args.append("-fno-emit-bin");
-                break :blk try std.process.run(b.allocator, b.graph.io, .{
-                    .argv = zig_args.items,
-                });
-            },
-        }
+
+        var rand_int: u64 = undefined;
+        b.graph.io.random(std.mem.asBytes(&rand_int));
+        const path = "tmp" ++ std.fs.path.sep_str ++ std.fmt.hex(rand_int);
+        b.cache_root.handle.createDirPath(b.graph.io, path) catch |err| return step.fail(
+            "create dir '{f}{s}' failed with {t}",
+            .{ b.cache_root, path, err },
+        );
+        const emit_bin_path = try b.cache_root.join(b.allocator, &.{ path, "compilecheck-exe" });
+        try zig_args.append(b.fmt("-femit-bin={s}", .{emit_bin_path}));
+        const result = try std.process.run(b.allocator, b.graph.io, .{
+            .argv = zig_args.items,
+        });
+        try b.cache_root.handle.deleteTree(b.graph.io, path);
+        break :blk result;
     };
 
     std.debug.assert(result.stdout.len == 0);
@@ -228,7 +182,6 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
             var files_not_found_count: u32 = 0;
             var undeclared_function_count: u32 = 0;
             var undeclared_identifier_count: u32 = 0;
-            var found_header = false;
             var line_it = std.mem.splitScalar(u8, result.stderr, '\n');
             while (line_it.next()) |line_untrimmed| {
                 const line = std.mem.trimEnd(u8, line_untrimmed, "\r");
@@ -240,22 +193,10 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
                 };
                 const err = line[error_start + error_prefix.len ..];
                 if (std.mem.endsWith(u8, err, "file not found")) {
-                    switch (check.kind) {
-                        .exe => {},
-                        .header => |h| found_header = found_header or (std.mem.indexOf(u8, err, h) != null),
-                    }
                     files_not_found_count += 1;
                 } else if (std.mem.startsWith(u8, err, "call to undeclared function ")) {
-                    switch (check.kind) {
-                        .exe => {},
-                        .header => return check.notAllowed(step, "undeclared function", result.stderr),
-                    }
                     undeclared_function_count += 1;
                 } else if (std.mem.startsWith(u8, err, "use of undeclared identifier")) {
-                    switch (check.kind) {
-                        .exe => {},
-                        .header => return check.notAllowed(step, "undeclared identifier", result.stderr),
-                    }
                     undeclared_identifier_count += 1;
                 } else {
                     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
