@@ -483,7 +483,6 @@ fn addPythonExe(
             for (entry.value_ptr.compile_args) |compile_arg| switch (compile_arg) {
                 .source => |src| exe.root_module.addCSourceFile(.{
                     .file = upstream.path(b.fmt("Modules/{s}", .{src})),
-                    .flags = &flags_common,
                 }),
                 .include => |inc| exe.root_module.addIncludePath(upstream.path(b.fmt("{s}", .{inc}))),
             };
@@ -819,18 +818,16 @@ fn addPyconfig(b: *std.Build, version: Version, upstream: *std.Build.Dependency,
     const sysconfigdata_contents = makesetup.writeSysConfigData(b, config_header);
     defer b.allocator.free(sysconfigdata_contents);
 
-    const sysconfigdata_filename = b.fmt("_sysconfigdata__{s}_.py", .{
-        switch (t.os.tag) {
-            .linux => "linux",
-            .macos => "darwin",
-            .windows => "win32",
-            else => std.debug.panic("todo: populate PLATFORM for os '{s}'", .{@tagName(t.os.tag)}),
-        }
-    });
+    const sysconfigdata_filename = b.fmt("_sysconfigdata__{s}_.py", .{switch (t.os.tag) {
+        .linux => "linux",
+        .macos => "darwin",
+        .windows => "win32",
+        else => std.debug.panic("todo: populate PLATFORM for os '{s}'", .{@tagName(t.os.tag)}),
+    }});
 
     const wf = b.addWriteFiles();
     const sysconfigdata_file = wf.add(sysconfigdata_filename, sysconfigdata_contents);
-    const install_step = b.addInstallFile(sysconfigdata_file, b.fmt("lib/python{s}/{s}", .{version.libName(), sysconfigdata_filename}));
+    const install_step = b.addInstallFile(sysconfigdata_file, b.fmt("lib/python{s}/{s}", .{ version.libName(), sysconfigdata_filename }));
     b.getInstallStep().dependOn(&install_step.step);
 
     return .{
