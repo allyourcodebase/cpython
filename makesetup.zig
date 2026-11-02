@@ -154,8 +154,7 @@ fn parseSetupFile(
                     if (part.len == 2) errExit("{s}:{}: expected '-IPATH' but just got '-I'", .{ file_path, lineno });
                     if (part.len > 11 and std.mem.startsWith(u8, part, "-I$(srcdir)")) {
                         compile_args.append(arena, .{ .include = arena.dupe(u8, part[11..]) catch |e| oom(e) }) catch |e| oom(e);
-                    } else
-                        compile_args.append(arena, .{ .include = arena.dupe(u8, part[2..]) catch |e| oom(e) }) catch |e| oom(e);
+                    } else compile_args.append(arena, .{ .include = arena.dupe(u8, part[2..]) catch |e| oom(e) }) catch |e| oom(e);
                 } else if (std.mem.startsWith(u8, part, "-l")) {
                     if (part.len == 2) errExit("{s}:{}: expected '-lLIB' but just got '-l'", .{ file_path, lineno });
                     libs.append(arena, part[2..]) catch |e| oom(e);
@@ -247,15 +246,12 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(0xff);
 }
 
-pub fn writeSysConfigData(b: *std.Build, configheader: *std.Build.Step.ConfigHeader) [] const u8 {
-
-    _ = configheader;
-
+pub fn writeSysConfigData(b: *std.Build) []const u8 {
     const alloc = b.allocator;
     var list: std.ArrayList(u8) = .empty;
     defer list.deinit(alloc);
 
-    list.appendSlice(alloc, "build_time_vars = {'ABIFLAGS': ''")  catch @panic("OOM");
+    list.appendSlice(alloc, "build_time_vars = {'ABIFLAGS': ''") catch @panic("OOM");
 
     // TODO: Output the values of the config header in a python format
 

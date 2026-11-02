@@ -1,12 +1,105 @@
-pub fn resolveQueries(b: *std.Build, template_files: []const []const u8, config_header: *ConfigHeader, config: Config, log_error_comments: bool) !void {
-    const arena = b.allocator;
-    const io = b.graph.io;
+pub fn main(init: std.process.Init) !void {
+    const arena = init.arena.allocator();
+    const io = init.io;
+
+    var template_files: std.ArrayList([]const u8) = .empty;
+    var output_path: ?[]const u8 = null;
+    var config: Config = .{};
+    var log_error_comments = false;
+
+    {
+        var args = try init.minimal.args.iterateAllocator(arena);
+        _ = args.next();
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "-o")) {
+                output_path = args.next() orelse fatal("-o requires an argument", .{});
+            } else if (std.mem.eql(u8, arg, "--zig-exe")) {
+                config.zig_exe = args.next() orelse fatal("--zig-exe requires an argument", .{});
+            } else if (std.mem.eql(u8, arg, "--cache-dir")) {
+                config.cache_dir = args.next() orelse fatal("--cache-dir requires an argument", .{});
+            } else if (std.mem.eql(u8, arg, "-target")) {
+                config.target_triple = args.next() orelse fatal("-target requires an argument", .{});
+            } else if (std.mem.eql(u8, arg, "-mcpu")) {
+                config.mcpu = args.next() orelse fatal("-mcpu requires an argument", .{});
+            } else if (std.mem.eql(u8, arg, "-version")) {
+                config.version = args.next() orelse fatal("-version requires an argument", .{});
+            } else if (std.mem.eql(u8, arg, "-infile")) {
+                config.infile = args.next() orelse fatal("-infile requires an argument", .{});
+            } else if (std.mem.eql(u8, arg, "-log_err")) {
+                log_error_comments = true;
+            } else if (std.mem.startsWith(u8, arg, "-I")) {
+                config.include_dirs.append(arena, arg) catch |e| oom(e);
+            } else {
+                template_files.append(arena, arg) catch |e| oom(e);
+            }
+        }
+    }
+
+    if (template_files.items.len == 0) {
+        const usage =
+            \\Usage: configquery [options] [template-files]
+            \\
+            \\Processes template files line by line. Lines starting with # are
+            \\comments. Each line is NAME VALUE where VALUE is either a literal
+            \\or a query starting with ?.
+            \\
+            \\Options:
+            \\  -o <path>                 Write output to file (default: stdout)
+            \\  --zig-exe [exe]           Path to zig executable (for compile queries)
+            \\  -target [name]            <arch><sub>-<os>-<abi> see the targets command
+            \\  -mcpu [cpu]               Specify target CPU and feature set
+            \\  -version [version]        Specify Python version
+            \\  -infile [python.h.in]     Path to python.h.in file
+            \\  -I[dir]                   Add directory to include search path
+            \\  -log_err                  Log to stderr the failed query output
+            \\  --cache-dir [path]        The local cache directory
+            \\
+            \\Literal Values
+            \\  SIZEOF_INT 4
+            \\  RETSIGTYPE .void
+            \\  PY_HASH "md5,sha1"
+            \\  HAVE_FEATURE defined
+            \\  MISSING_FEATURE undef
+            \\
+            \\Query syntax: NAME ? PASS|FAIL [define=DEF,...] [include=HDR,...] [COMPILE_BODY]
+            \\
+            \\  HAVE_ALLOCA_H ? 1|undef include=alloca.h
+            \\  HAVE_FORK ? 1|undef include=unistd.h int main(){fork();}
+            \\  HAVE_PRLIMIT ? 1|undef include=sys/time.h,sys/resource.h int main(){prlimit(0,0,0,0);}
+            \\  HAVE_CLOSE_RANGE ? 1|undef define=_GNU_SOURCE include=unistd.h int main(){close_range(0,0,0);}
+            \\
+            \\configquery is purposely limited to compile-only (no link). Its up to the caller to ensure
+            \\header/symbol availability matches library symbol availability.
+            \\
+        ;
+        var stderr = std.Io.File.stderr().writer(io, &.{});
+        stderr.interface.writeAll(usage) catch return stderr.err.?;
+        stderr.interface.flush() catch return stderr.err.?;
+        std.process.exit(1);
+    }
+
+    const config_h_in = std.Io.Dir.cwd().readFileAlloc(io, config.infile.?, arena, .unlimited) catch |err| fatal(
+        "failed to read '{s}' with {t}",
+        .{ config.infile.?, err },
+    );
+
+    var config_header: std.array_hash_map.String(ConfigHeader.Value) = .empty;
+    try initialize_config(io, arena, config, &config_header);
+
+    var out_buf: [4096]u8 = undefined;
+    var out_file = if (output_path) |path| std.Io.Dir.cwd().createFile(io, path, .{}) catch |err| fatal(
+        "failed to create '{s}' with {t}",
+        .{ path, err },
+    ) else std.Io.File.stdout();
+    defer if (output_path != null) out_file.close(io);
+    var out_writer = out_file.writer(io, &out_buf);
+    const out = &out_writer.interface;
 
     var queries: std.ArrayList(Query) = .empty;
     var name_set: std.StringHashMapUnmanaged(u32) = .empty;
     var error_count: u32 = 0;
 
-    for (template_files) |template_path| {
+    for (template_files.items) |template_path| {
         const content = std.Io.Dir.cwd().readFileAlloc(io, template_path, arena, .unlimited) catch |err| fatal(
             "failed to read '{s}' with {t}",
             .{ template_path, err },
@@ -24,7 +117,7 @@ pub fn resolveQueries(b: *std.Build, template_files: []const []const u8, config_
                 .literal => |lit| {
                     checkUnique(arena, &name_set, io, template_path, line_num, lit.config_name, &error_count);
                     if (parseValue(lit.value_str)) |entry| {
-                        config_header.values.put(b.allocator, lit.config_name, entry) catch @panic("OOM");
+                        config_header.put(arena, lit.config_name, entry) catch @panic("OOM");
                     } else {
                         error_count += 1;
                         reportError(io, template_path, line_num, "{s} '{s}'", .{ lit.config_name, line_untrimmed });
@@ -39,7 +132,7 @@ pub fn resolveQueries(b: *std.Build, template_files: []const []const u8, config_
                             .line_num = line_num,
                         }) catch |e| oom(e);
                     } else {
-                        config_header.values.put(b.allocator, input.config_name, .{ .string = input.pass_text }) catch @panic("OOM");
+                        config_header.put(arena, input.config_name, .{ .string = input.pass_text }) catch @panic("OOM");
                     }
                 },
             }
@@ -50,11 +143,12 @@ pub fn resolveQueries(b: *std.Build, template_files: []const []const u8, config_
 
     if (queries.items.len > 0) {
         const zig_exe = config.zig_exe orelse fatal("compile query requires zig-exe", .{});
+        const cache_dir = config.cache_dir orelse fatal("compile query requires --cache-dir", .{});
         const argv_template = buildArgvTemplate(arena, zig_exe, &config);
 
         var group: std.Io.Group = .init;
         for (queries.items, 0..) |*q, i| {
-            group.async(io, runCompileCheck, .{ arena, io, q, argv_template, i });
+            group.async(io, runCompileCheck, .{ arena, io, q, argv_template, cache_dir, i });
         }
         group.await(io) catch |err| switch (err) {
             error.Canceled => fatal("canceled", .{}),
@@ -69,7 +163,7 @@ pub fn resolveQueries(b: *std.Build, template_files: []const []const u8, config_
                 const value_text = if (result.success) q.input.pass_text else q.input.fail_text;
 
                 if (parseValue(value_text)) |entry| {
-                    config_header.values.put(b.allocator, q.input.config_name, entry) catch @panic("OOM");
+                    config_header.put(arena, q.input.config_name, entry) catch @panic("OOM");
                 } else {
                     error_count += 1;
                     reportError(io, q.file_path, q.line_num, "{s} '{s}'", .{ q.input.config_name, value_text });
@@ -81,13 +175,25 @@ pub fn resolveQueries(b: *std.Build, template_files: []const []const u8, config_
         }
     }
 
+    const all_keys = config_header.keys();
+
+    var value_map: ValueMap = .empty;
+    try value_map.ensureTotalCapacity(arena, all_keys.len);
+    for (all_keys) |key| value_map.putAssumeCapacityNoClobber(key, false);
+
+    try renderAutoConfUndef(config_h_in, out, &config_header, &value_map, config.infile.?);
+
+    out.flush() catch return out_writer.err.?;
     if (error_count > 0) fatal("{} errors", .{error_count});
 }
 
 pub const Config = struct {
     zig_exe: ?[]const u8 = null,
+    cache_dir: ?[]const u8 = null,
     target_triple: ?[]const u8 = null,
     mcpu: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+    infile: ?[]const u8 = null,
     include_dirs: std.ArrayList([]const u8) = .empty,
 };
 
@@ -122,7 +228,245 @@ const Query = struct {
     };
 };
 
-pub fn parseValue(str: []const u8) ?ConfigHeader.Value {
+fn have(x: bool) ?u1 {
+    return if (x) 1 else null;
+}
+
+fn initialize_config(io: std.Io, alloc: std.mem.Allocator, config: Config, config_header: *std.array_hash_map.String(ConfigHeader.Value)) !void {
+    const query = try std.Target.Query.parse(.{ .arch_os_abi = config.target_triple.? });
+    const t = try std.zig.system.resolveTargetQuery(io, query);
+
+    addValues(alloc, config_header, .{
+        .ALIGNOF_LONG = 8,
+        .ALIGNOF_SIZE_T = 8,
+        .DOUBLE_IS_LITTLE_ENDIAN_IEEE754 = 1,
+        .ENABLE_IPV6 = 1,
+        .MAJOR_IN_SYSMACROS = have(t.os.tag == .linux),
+        .PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT = 1,
+        .PTHREAD_SYSTEM_SCHED_SUPPORTED = 1,
+        .PY_BUILTIN_HASHLIB_HASHES = "md5,sha1,sha256,sha512,sha3,blake2",
+        .PY_COERCE_C_LOCALE = 1,
+        .PY_SSL_DEFAULT_CIPHERS = 1,
+        .PY_SUPPORT_TIER = 2,
+        .RETSIGTYPE = .void,
+        .SIZEOF_DOUBLE = 8,
+        .SIZEOF_FLOAT = 4,
+        .SIZEOF_FPOS_T = 16,
+        .SIZEOF_INT = 4,
+        .SIZEOF_LONG = 8,
+        .SIZEOF_LONG_DOUBLE = 16,
+        .SIZEOF_LONG_LONG = 8,
+        .SIZEOF_OFF_T = 8,
+        .SIZEOF_PID_T = 4,
+        .SIZEOF_PTHREAD_KEY_T = 4,
+        .SIZEOF_PTHREAD_T = 8,
+        .SIZEOF_SHORT = 2,
+        .SIZEOF_SIZE_T = 8,
+        .SIZEOF_TIME_T = 8,
+        .SIZEOF_UINTPTR_T = 8,
+        .SIZEOF_VOID_P = 8,
+        .SIZEOF_WCHAR_T = 4,
+        .SIZEOF__BOOL = 1,
+        .STDC_HEADERS = 1,
+        .SYS_SELECT_WITH_SYS_TIME = 1,
+        .WITH_DECIMAL_CONTEXTVAR = 1,
+        .WITH_DOC_STRINGS = 1,
+        .WITH_FREELISTS = 1,
+        .WITH_PYMALLOC = 1,
+        ._DARWIN_C_SOURCE = 1,
+        ._FILE_OFFSET_BITS = 64,
+        ._LARGEFILE_SOURCE = 1,
+        ._NETBSD_SOURCE = 1,
+        ._POSIX_C_SOURCE = .@"200809L",
+        ._PYTHONFRAMEWORK = "",
+        ._REENTRANT = 1,
+        ._XOPEN_SOURCE = 700,
+        ._XOPEN_SOURCE_EXTENDED = 1,
+        .__BSD_VISIBLE = 1,
+        ._ALL_SOURCE = 1,
+        ._GNU_SOURCE = 1,
+        ._POSIX_PTHREAD_SEMANTICS = 1,
+        ._TANDEM_SOURCE = 1,
+        .__EXTENSIONS__ = 1,
+
+        .AC_APPLE_UNIVERSAL_BUILD = null,
+        .AIX_BUILDDATE = null,
+        .AIX_GENUINE_CPLUSPLUS = null,
+        .ALT_SOABI = null,
+        .ANDROID_API_LEVEL = null,
+        .DOUBLE_IS_ARM_MIXED_ENDIAN_IEEE754 = null,
+        .DOUBLE_IS_BIG_ENDIAN_IEEE754 = null,
+        .GETPGRP_HAVE_ARG = null,
+        .MAJOR_IN_MKDEV = null,
+        .MVWDELCH_IS_EXPRESSION = null,
+        .PACKAGE_BUGREPORT = null,
+        .PACKAGE_NAME = null,
+        .PACKAGE_STRING = null,
+        .PACKAGE_TARNAME = null,
+        .PACKAGE_URL = null,
+        .PACKAGE_VERSION = null,
+        .POSIX_SEMAPHORES_NOT_ENABLED = null,
+        .PYLONG_BITS_IN_DIGIT = null,
+        .PY_SQLITE_ENABLE_LOAD_EXTENSION = null,
+        .PY_SQLITE_HAVE_SERIALIZE = null,
+        .PY_SSL_DEFAULT_CIPHER_STRING = null,
+        .Py_DEBUG = null,
+        .Py_ENABLE_SHARED = null,
+        .Py_HASH_ALGORITHM = null,
+        .Py_STATS = null,
+        .Py_SUNOS_VERSION = null,
+        .Py_TRACE_REFS = null,
+        .SETPGRP_HAVE_ARG = null,
+        .SIGNED_RIGHT_SHIFT_ZERO_FILLS = null,
+        .THREAD_STACK_SIZE = null,
+        .TIMEMODULE_LIB = null,
+        .TM_IN_SYS_TIME = null,
+        .USE_COMPUTED_GOTOS = null,
+        .WINDOW_HAS_FLAGS = null,
+        .WITH_DTRACE = null,
+        .WITH_DYLD = null,
+        .WITH_EDITLINE = null,
+        .WITH_LIBINTL = null,
+        .WITH_NEXT_FRAMEWORK = null,
+        .WITH_VALGRIND = null,
+        .X87_DOUBLE_ROUNDING = null,
+        ._BSD_SOURCE = null,
+        ._INCLUDE__STDC_A1_SOURCE = null,
+        ._LARGE_FILES = null,
+        ._MINIX = null,
+        ._POSIX_1_SOURCE = null,
+        ._POSIX_SOURCE = null,
+        ._POSIX_THREADS = null,
+        ._WASI_EMULATED_GETPID = null,
+        ._WASI_EMULATED_PROCESS_CLOCKS = null,
+        ._WASI_EMULATED_SIGNAL = null,
+        .clock_t = null,
+        .@"const" = null,
+        .gid_t = null,
+        .mode_t = null,
+        .off_t = null,
+        .pid_t = null,
+        .signed = null,
+        .size_t = null,
+        .socklen_t = null,
+        .uid_t = null,
+        .WORDS_BIGENDIAN = null,
+
+        .HAVE_BROKEN_MBSTOWCS = null,
+        .HAVE_BROKEN_NICE = null,
+        .HAVE_BROKEN_PIPE_BUF = null,
+        .HAVE_BROKEN_POLL = null,
+        .HAVE_BROKEN_POSIX_SEMAPHORES = null,
+        .HAVE_BROKEN_PTHREAD_SIGMASK = null,
+        .HAVE_BROKEN_SEM_GETVALUE = null,
+        .HAVE_BROKEN_UNSETENV = null,
+
+        .HAVE_PTHREAD_STUBS = null,
+        .HAVE_USABLE_WCHAR_T = null,
+        .HAVE_NON_UNICODE_WCHAR_T_REPRESENTATION = null,
+        .HAVE_CHROOT = have(t.os.tag == .linux),
+        .HAVE_GCC_ASM_FOR_MC68881 = have(t.cpu.arch == .m68k),
+        .HAVE_GCC_ASM_FOR_X64 = have(t.cpu.arch == .x86_64),
+        .HAVE_GCC_ASM_FOR_X87 = have(t.cpu.arch == .x86_64 or t.cpu.arch == .x86),
+        // Readline type (static configuration, not function test)
+        .HAVE_RL_COMPDISP_FUNC_T = null,
+    });
+    if (std.mem.eql(u8, config.version.?, "3.11.13")) addValues(alloc, config_header, .{
+        .PY_FORMAT_SIZE_T = "z",
+        .TIME_WITH_SYS_TIME = 1,
+        .FLOAT_WORDS_BIGENDIAN = null,
+    });
+    if (std.mem.eql(u8, config.version.?, "3.12.11"))
+        addValues(alloc, config_header, .{
+            .ALIGNOF_MAX_ALIGN_T = @as(u32, switch (t.cpu.arch) {
+                .x86_64, .aarch64 => 16,
+                .x86, .arm => 8,
+                else => 8,
+            }),
+
+            // ncurses library (static configuration, not function test)
+            .HAVE_NCURSESW = null,
+
+            // Performance trampoline feature
+            .PY_HAVE_PERF_TRAMPOLINE = null,
+
+            ._HPUX_ALT_XOPEN_SOCKET_API = null,
+            ._OPENBSD_SOURCE = null,
+
+            // C standard feature test macros (all set to null as they're optional)
+            .__STDC_WANT_IEC_60559_ATTRIBS_EXT__ = null,
+            .__STDC_WANT_IEC_60559_BFP_EXT__ = null,
+            .__STDC_WANT_IEC_60559_DFP_EXT__ = null,
+            .__STDC_WANT_IEC_60559_FUNCS_EXT__ = null,
+            .__STDC_WANT_IEC_60559_TYPES_EXT__ = null,
+            .__STDC_WANT_LIB_EXT2__ = null,
+            .__STDC_WANT_MATH_SPEC_FUNCS__ = null,
+        });
+}
+pub fn addValue(arena: std.mem.Allocator, config_header: *std.array_hash_map.String(ConfigHeader.Value), name: []const u8, comptime T: type, value: T) void {
+    return addValueInner(arena, config_header, name, T, value) catch @panic("OOM");
+}
+
+fn addValueInner(arena: std.mem.Allocator, config_header: *std.array_hash_map.String(ConfigHeader.Value), name: []const u8, comptime T: type, value: T) !void {
+    switch (@typeInfo(T)) {
+        .null => {
+            try config_header.put(arena, name, .undef);
+        },
+        .void => {
+            try config_header.put(arena, name, .defined);
+        },
+        .bool => {
+            try config_header.put(arena, name, .{ .boolean = value });
+        },
+        .int => {
+            try config_header.put(arena, name, .{ .int = value });
+        },
+        .comptime_int => {
+            try config_header.put(arena, name, .{ .int = value });
+        },
+        .@"enum", .enum_literal => {
+            try config_header.put(arena, name, .{ .ident = @tagName(value) });
+        },
+        .optional => {
+            if (value) |x| {
+                return addValueInner(arena, config_header, name, @TypeOf(x), x);
+            } else {
+                try config_header.put(arena, name, .undef);
+            }
+        },
+        .pointer => |ptr| {
+            switch (@typeInfo(ptr.child)) {
+                .array => |array| {
+                    if (ptr.size == .one and array.child == u8) {
+                        try config_header.put(arena, name, .{ .string = value });
+                        return;
+                    }
+                },
+                .int => {
+                    if (ptr.size == .slice and ptr.child == u8) {
+                        try config_header.put(arena, name, .{ .string = value });
+                        return;
+                    }
+                },
+                else => {},
+            }
+
+            @compileError("unsupported ConfigHeader value type: " ++ @typeName(T));
+        },
+        else => @compileError("unsupported ConfigHeader value type: " ++ @typeName(T)),
+    }
+}
+
+pub fn addValues(arena: std.mem.Allocator, config_header: *std.array_hash_map.String(ConfigHeader.Value), values: anytype) void {
+    const info = @typeInfo(@TypeOf(values)).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        addValue(arena, config_header, field_name, field_type, @field(values, field_name));
+    }
+}
+
+fn parseValue(ostr: ?[]const u8) ?ConfigHeader.Value {
+    if (ostr == null) return .undef;
+    const str = ostr.?;
     if (std.mem.eql(u8, str, "undef")) return .undef;
     if (std.mem.eql(u8, str, "defined")) return .defined;
     if (std.mem.eql(u8, str, "false")) return .{ .boolean = false };
@@ -250,9 +594,10 @@ fn runCompileCheck(
     io: std.Io,
     query: *Query,
     argv_template: []const []const u8,
+    cache_dir: []const u8,
     index: usize,
 ) void {
-    query.result = doCompileCheck(arena, io, query, argv_template, index);
+    query.result = doCompileCheck(arena, io, query, argv_template, cache_dir, index);
 }
 
 fn doCompileCheck(
@@ -260,6 +605,7 @@ fn doCompileCheck(
     io: std.Io,
     query: *const Query,
     argv_template: []const []const u8,
+    cache_dir: []const u8,
     index: usize,
 ) Query.Result {
     const sep = std.fs.path.sep_str;
@@ -270,9 +616,7 @@ fn doCompileCheck(
         else => @compileError("unsupported OS"),
     };
     var task_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base_dir = "."; // TODO: Need a reliable temporary directory instead of the build path to place the test programs
-
-    const task_dir = std.fmt.bufPrint(&task_dir_buf, "{s}" ++ sep ++ "tmp" ++ sep ++ "cq-{}-{}", .{ base_dir, pid, index }) catch
+    const task_dir = std.fmt.bufPrint(&task_dir_buf, "{s}" ++ sep ++ "tmp" ++ sep ++ "cq-{}-{}", .{ cache_dir, pid, index }) catch
         fatal("cache-dir path too long", .{});
     std.Io.Dir.cwd().createDirPath(io, task_dir) catch |err|
         fatal("failed to create '{s}': {t}", .{ task_dir, err });
@@ -442,6 +786,101 @@ test parseLine {
     try std.testing.expect(parseLine("NOVALUE") == .err);
 }
 
+fn ensureAllValuesUsed(
+    value_map: *ValueMap,
+    src_path: []const u8,
+) !void {
+    var any_errors = false;
+    for (value_map.keys(), value_map.values()) |name, used| {
+        if (used) continue;
+        std.log.err("{s}: config header value unused: {s}", .{ src_path, name });
+        any_errors = true;
+    }
+    if (any_errors) unreachable;
+}
+
+const os_newline = if (@import("builtin").os.tag == .windows) "\r\n" else "\n";
+
+fn detectNewline(contents: []const u8) []const u8 {
+    const lf_index = std.mem.findScalar(u8, contents, '\n') orelse return os_newline;
+    return if (lf_index > 0 and contents[lf_index - 1] == '\r') "\r\n" else "\n";
+}
+
+const header_text = "This file was generated by ConfigHeader using the Zig Build System.";
+const c_generated_line = "/* " ++ header_text ++ " */";
+const asm_generated_line = "; " ++ header_text;
+
+fn renderAutoConfUndef(
+    contents: []const u8,
+    w: *Writer,
+    config_header: *const std.array_hash_map.String(ConfigHeader.Value),
+    value_map: *ValueMap,
+    src_path: []const u8,
+) !void {
+    const newline = detectNewline(contents);
+
+    try w.writeAll(c_generated_line);
+    try w.writeAll(newline);
+
+    var any_errors = false;
+    var line_index: u32 = 0;
+    var line_it = std.mem.splitScalar(u8, contents, '\n');
+    while (line_it.next()) |raw_line| : (line_index += 1) {
+        const last_line = line_it.index == line_it.buffer.len;
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
+
+        if (!std.mem.startsWith(u8, line, "#")) {
+            try w.writeAll(line);
+            if (!last_line) try w.writeAll(newline);
+            continue;
+        }
+        var it = std.mem.tokenizeAny(u8, line[1..], " \t\r");
+        const undef = it.next().?;
+        if (!std.mem.eql(u8, undef, "undef")) {
+            try w.writeAll(line);
+            if (!last_line) try w.writeAll(newline);
+            continue;
+        }
+        const name = it.next().?;
+        const index = value_map.getIndex(name) orelse {
+            std.log.err("{s}:{d}: unspecified config header value: {s}", .{
+                src_path, line_index + 1, name,
+            });
+            any_errors = true;
+            continue;
+        };
+        value_map.values()[index] = true; // Set to used.
+        try renderValueC(w, newline, name, config_header.get(name).?);
+    }
+
+    try ensureAllValuesUsed(value_map, src_path);
+    if (any_errors) return error.MakeFailed;
+}
+
+fn renderValueC(w: *Writer, newline: []const u8, name: []const u8, value: ConfigHeader.Value) !void {
+    switch (value) {
+        .undef => try w.print("/* #undef {s} */{s}", .{ name, newline }),
+        .defined => try w.print("#define {s}{s}", .{ name, newline }),
+        .boolean => |b| return renderValueCBool(w, newline, name, b),
+        .int => |i| try w.print("#define {s} {d}{s}", .{ name, i, newline }),
+        .ident => |ident| return renderValueCIdent(w, newline, name, ident),
+        .string => |string| try w.print("#define {s} \"{f}\"{s}", .{ name, std.zig.fmtString(string), newline }),
+    }
+}
+
+fn renderValueCBool(w: *Writer, newline: []const u8, name: []const u8, b: bool) Writer.Error!void {
+    return w.print("#define {s} {c}{s}", .{ name, @as(u8, '0') + @intFromBool(b), newline });
+}
+
+fn renderValueCIdent(w: *Writer, newline: []const u8, name: []const u8, ident: []const u8) Writer.Error!void {
+    try w.print("#define {s}", .{name});
+    if (ident.len > 0) {
+        try w.writeByte(' ');
+        try w.writeAll(ident);
+    }
+    return w.writeAll(newline);
+}
+
 fn reportError(io: std.Io, file: []const u8, line: u32, comptime fmt: []const u8, args: anytype) void {
     var stderr = std.Io.File.stderr().writer(io, &.{});
     stderr.interface.print("{s}:{}: " ++ fmt ++ "\n", .{ file, line } ++ args) catch
@@ -461,3 +900,5 @@ const std = @import("std");
 const ConfigHeaderExt = @import("ConfigHeaderExt.zig");
 const ConfigHeader = std.Build.Step.ConfigHeader;
 const LazyPath = std.Build.LazyPath;
+const Writer = std.Io.Writer;
+const ValueMap = std.array_hash_map.String(bool);
