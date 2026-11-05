@@ -4,96 +4,53 @@ const print = std.debug.print;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const Allocator = std.mem.Allocator;
 
-pub fn main(init: std.process.Init) !void {
-    const arena = init.arena.allocator();
-    const all_args = try init.minimal.args.toSlice(arena);
-    const io = init.io;
+pub fn makesetup(b: *std.Build, setup_files: []const []const u8, setup_files_src_paths: []const []const u8) Setup {
+    const arena = b.allocator;
+    const setup = try parseSetupFiles(arena, setup_files, setup_files_src_paths);
 
-    if (all_args.len <= 1) {
-        var stderr = std.Io.File.stderr().writer(io, &.{});
-        try stderr.interface.writeAll("usage: makesetup UPSTREAM_SRC OUT_DIR SETUP_FILES...\n");
-        std.process.exit(0xff);
-    }
-    const args = all_args[1..];
-    if (args.len < 3) errExit("expected at least 3 cmdline args but got {}", .{args.len});
+    return setup;
 
-    const upstream_src = args[0];
-    const out_path = args[1];
-    const setup_files = args[2..];
-
-    const setup = try parseSetupFiles(arena, io, setup_files);
-
-    const config_in_path = std.Io.Dir.path.join(arena, &.{ upstream_src, "Modules", "config.c.in" }) catch |e| oom(e);
-    const config_in = std.Io.Dir.cwd().readFileAlloc(io, config_in_path, arena, .unlimited) catch |e|
-        std.debug.panic("open file '{s}' failed with {t}", .{ config_in_path, e });
-
-    var out_dir = try std.Io.Dir.cwd().createDirPathOpen(io, out_path, .{});
-    defer out_dir.close(io);
-
-    {
-        var file = try out_dir.createFile(io, "config.c", .{});
-        defer file.close(io);
-        var out_file_buf: [4096]u8 = undefined;
-        var file_writer = file.writer(io, &out_file_buf);
-        writeConfigC(setup, config_in_path, config_in, &file_writer.interface) catch |err| switch (err) {
-            error.WriteFailed => return file_writer.err orelse error.Unexpected,
-        };
-    }
-
-    {
-        var out_file = try out_dir.createFile(io, "module-compile-args.txt", .{});
-        defer out_file.close(io);
-        var out_file_buf: [4096]u8 = undefined;
-        var file_writer = out_file.writer(io, &out_file_buf);
-        writeCompileArgs(setup, &file_writer.interface) catch |err| switch (err) {
-            error.WriteFailed => return file_writer.err orelse error.Unexpected,
-        };
-    }
+    // {
+    //     var out_file = try out_dir.createFile(io, "module-compile-args.txt", .{});
+    //     defer out_file.close(io);
+    //     var out_file_buf: [4096]u8 = undefined;
+    //     var file_writer = out_file.writer(io, &out_file_buf);
+    //     writeCompileArgs(setup, &file_writer.interface) catch |err| switch (err) {
+    //         error.WriteFailed => return file_writer.err orelse error.Unexpected,
+    //     };
+    // }
 }
 
-fn writeConfigC(
+pub fn writeConfigC(
+    b: *std.Build,
     setup: Setup,
     config_in_path: []const u8,
     config_in: []const u8,
-    writer: *std.Io.Writer,
-) error{WriteFailed}!void {
-    try writer.print("/* Generated automatically from {s} by makesetup. */\n", .{config_in_path});
+) []const u8 {
+    const alloc = b.allocator;
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(alloc);
+
+    list.appendSlice(alloc, b.fmt("/* Generated automatically from {s} by makesetup. */\n", .{config_in_path})) catch @panic("OOM");
     var lines = std.mem.splitScalar(u8, config_in, '\n');
     while (lines.next()) |line| {
         if (std.mem.indexOf(u8, line, "MARKER 1")) |_| {
             var it = setup.modules.iterator();
             while (it.next()) |entry| {
                 if (!entry.value_ptr.enabled) continue;
-                try writer.print("extern PyObject* PyInit_{s}(void);\n", .{entry.key_ptr.*});
+                list.appendSlice(alloc, b.fmt("extern PyObject* PyInit_{s}(void);\n", .{entry.key_ptr.*})) catch @panic("OOM");
             }
         } else if (std.mem.indexOf(u8, line, "MARKER 2")) |_| {
             var it = setup.modules.iterator();
             while (it.next()) |entry| {
                 if (!entry.value_ptr.enabled) continue;
-                try writer.print("    {{\"{s}\", PyInit_{0s}}},\n", .{entry.key_ptr.*});
+                list.appendSlice(alloc, b.fmt("    {{\"{s}\", PyInit_{0s}}},\n", .{entry.key_ptr.*})) catch @panic("OOM");
             }
         }
-        try writer.writeAll(line);
-        try writer.writeByte('\n');
+        list.appendSlice(alloc, line) catch @panic("OOM");
+        list.append(alloc, '\n') catch @panic("OOM");
     }
-    try writer.flush();
-}
-
-fn writeCompileArgs(setup: Setup, writer: *std.Io.Writer) error{WriteFailed}!void {
-    var it = setup.modules.iterator();
-    while (it.next()) |entry| {
-        const module_name = entry.key_ptr.*;
-        {
-            const suffix: []const u8 = if (entry.value_ptr.enabled) "" else " (DISABLED)";
-            try writer.print("# Module '{s}'{s}\n", .{ module_name, suffix });
-        }
-        const prefix: []const u8 = if (entry.value_ptr.enabled) "" else "# ";
-        for (entry.value_ptr.compile_args) |compile_arg| switch (compile_arg) {
-            .source => |src| try writer.print("{s}Modules/{s}\n", .{ prefix, src }),
-            .include => |inc| try writer.print("{s}-I{s}\n", .{ prefix, inc }),
-        };
-    }
-    try writer.flush();
+    return list.toOwnedSlice(alloc) catch @panic("OOM");
 }
 
 const CompileArg = union(enum) {
@@ -109,15 +66,14 @@ const Module = struct {
     compile_args: []const CompileArg,
     libs: []const []const u8,
 };
-const Setup = struct {
+pub const Setup = struct {
     modules: std.StringArrayHashMapUnmanaged(Module) = .{},
+    outfile: ?std.Build.LazyPath = null,
 };
 
-fn parseSetupFiles(arena: std.mem.Allocator, io: Io, setup_files: []const []const u8) !Setup {
+fn parseSetupFiles(arena: std.mem.Allocator, setup_files: []const []const u8, setup_files_src_paths: []const []const u8) !Setup {
     var setup: Setup = .{};
-    for (setup_files) |file_path| {
-        const content = std.Io.Dir.cwd().readFileAlloc(io, file_path, arena, .unlimited) catch |e|
-            std.debug.panic("open '{s}' failed with {t}", .{ file_path, e });
+    for (setup_files, setup_files_src_paths) |content, file_path| {
         try parseSetupFile(arena, &setup, file_path, content);
     }
     return setup;
@@ -188,7 +144,7 @@ fn parseSetupFile(
                 if (std.mem.startsWith(u8, part, "#")) {
                     break;
                 } else if (std.mem.endsWith(u8, part, ".c")) {
-                    compile_args.append(arena, .{ .source = part }) catch |e| oom(e);
+                    compile_args.append(arena, .{ .source = arena.dupe(u8, part) catch |e| oom(e) }) catch |e| oom(e);
                 } else if (std.mem.endsWith(u8, part, ".a")) {
                     libraries.append(arena, part) catch |e| oom(e);
                 } else if (std.mem.startsWith(u8, part, "-D")) {
@@ -196,7 +152,9 @@ fn parseSetupFile(
                     defines.append(arena, part[2..]) catch |e| oom(e);
                 } else if (std.mem.startsWith(u8, part, "-I")) {
                     if (part.len == 2) errExit("{s}:{}: expected '-IPATH' but just got '-I'", .{ file_path, lineno });
-                    compile_args.append(arena, .{ .include = part[2..] }) catch |e| oom(e);
+                    if (part.len > 11 and std.mem.startsWith(u8, part, "-I$(srcdir)")) {
+                        compile_args.append(arena, .{ .include = arena.dupe(u8, part[11..]) catch |e| oom(e) }) catch |e| oom(e);
+                    } else compile_args.append(arena, .{ .include = arena.dupe(u8, part[2..]) catch |e| oom(e) }) catch |e| oom(e);
                 } else if (std.mem.startsWith(u8, part, "-l")) {
                     if (part.len == 2) errExit("{s}:{}: expected '-lLIB' but just got '-l'", .{ file_path, lineno });
                     libs.append(arena, part[2..]) catch |e| oom(e);
@@ -286,4 +244,18 @@ fn oom(e: error{OutOfMemory}) noreturn {
 fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     std.log.err(fmt, args);
     std.process.exit(0xff);
+}
+
+pub fn writeSysConfigData(b: *std.Build) []const u8 {
+    const alloc = b.allocator;
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(alloc);
+
+    list.appendSlice(alloc, "build_time_vars = {'ABIFLAGS': ''") catch @panic("OOM");
+
+    // TODO: Output the values of the config header in a python format
+
+    list.appendSlice(alloc, "}\n") catch @panic("OOM");
+
+    return list.toOwnedSlice(alloc) catch @panic("OOM");
 }
