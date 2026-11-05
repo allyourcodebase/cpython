@@ -897,7 +897,6 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 const std = @import("std");
-const ConfigHeaderExt = @import("ConfigHeaderExt.zig");
 const ConfigHeader = std.Build.Step.ConfigHeader;
 const LazyPath = std.Build.LazyPath;
 const Writer = std.Io.Writer;
